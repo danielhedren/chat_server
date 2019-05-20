@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang=en-us>
+<meta charset=utf-8>
+<title>Jodel, except chat</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<body>
+    <script>
+        "use strict;"
+
+        function uuidv4() {
+        return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            )
+        }
+
+        ws = new WebSocket("ws://localhost:3012");
+        ws.onopen = (e) => {
+            let username = uuidv4();
+
+            let data = { Register: { username: username, password: "password" } }
+            ws.send(JSON.stringify(data));
+
+            data = { Login: { username: username, password: "password" } }
+            ws.send(JSON.stringify(data));
+
+            for (let i = 0; i < 1000; i++) {
+                data = { SendMessage: { msg: "hello, world" } }
+                ws.send(JSON.stringify(data));
+                
+            }
+            
+        }
+
+        ws.onmessage = (e) => {
+            console.log(e);
+        }
+    </script>
+</body>
+</html>
