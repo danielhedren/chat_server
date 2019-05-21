@@ -8,6 +8,7 @@ use ws::{listen, CloseCode, Handler, Handshake, Result};
 use serde::{Deserialize, Serialize};
 
 const PBKDF2_ITERATIONS: u32 = 1;
+const ENDPOINT: &str = "127.0.0.1:3012";
 
 #[derive(Serialize, Deserialize)]
 enum JsonMessage {
@@ -156,14 +157,18 @@ impl Handler for Server {
                         let _ = self.channel.send(Message::Login { id: self.id, username, password, tx });
 
                         if let Ok(response) = rx.recv() {
-                            let _ = self.socket.send(serde_json::to_string(&response).unwrap());
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = self.socket.send(json);
+                            }
                         }
                     },
                     JsonMessage::Register { username, password } => {
                         let _ = self.channel.send(Message::Register { id: self.id, username, password, tx });
 
                         if let Ok(response) = rx.recv() {
-                            let _ = self.socket.send(serde_json::to_string(&response).unwrap());
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = self.socket.send(json);
+                            }
                         }
                     },
                     JsonMessage::SendMessage { msg } => {
@@ -192,16 +197,16 @@ fn main() {
     let mut users = Users::new();
     
     let server = thread::spawn(move || {
-        ws::Builder::new()
-        .with_settings(ws::Settings {max_connections: 1000, ..ws::Settings::default()})
+        if let Ok(socket) = ws::Builder::new()
+        .with_settings(ws::Settings {max_connections: 10000, ..ws::Settings::default()})
         .build(|out| Server {
             id: 0,
             user_id: None,
             socket: out,
             channel: tx.clone(),
-        }).unwrap()
-        .listen("127.0.0.1:3012")
-        .unwrap();
+        }) {
+            let _ = socket.listen(ENDPOINT);
+        }
     });
 
     while let Ok(msg) = rx.recv() {
@@ -250,13 +255,13 @@ fn main() {
                 if let Some(server) = servers.get(&id) {
                     if let Some(user_id) = server.user_id {
                         if let Some(user) = &users.get_by_id(&user_id) {
-                            let message = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }).unwrap();
-
-                            for (_, server) in &servers {
-                                if let Some(user_id_other) = server.user_id {
-                                    if let Some(user_other) = &users.get_by_id(&user_id_other) {
-                                        if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
-                                            let _ = server.socket.send(message.clone());
+                            if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
+                                for (_, server) in &servers {
+                                    if let Some(user_id_other) = server.user_id {
+                                        if let Some(user_other) = &users.get_by_id(&user_id_other) {
+                                            if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
+                                                let _ = server.socket.send(message.clone());
+                                            }
                                         }
                                     }
                                 }
