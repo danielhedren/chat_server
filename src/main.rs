@@ -3,9 +3,11 @@ extern crate serde;
 extern crate serde_json;
 extern crate pbkdf2;
 extern crate crossbeam;
+extern crate crossbeam_utils;
 extern crate chashmap;
+extern crate evmap;
 
-use std::{sync::Arc, sync::Mutex, sync::atomic::AtomicUsize, sync::atomic::Ordering, thread, collections::HashMap, collections::VecDeque, time, fmt::Display, fmt::Formatter, fmt::Result as FmtResult};
+use std::{sync::Arc, sync::Mutex, sync::atomic::AtomicUsize, sync::atomic::Ordering, thread};
 use ws::{CloseCode, Handler, Handshake, Result};
 use serde::{Deserialize, Serialize};
 use crossbeam::channel::unbounded;
@@ -90,8 +92,8 @@ impl Users {
         self.users_by_name.contains_key(username)
     }
 
-    fn add(&mut self, username: &str, password: &str) -> usize {
-        let c_id = self.current_id.fetch_add(1, Ordering::Relaxed);
+    fn add(&self, username: &str, password: &str) -> usize {
+        let c_id = self.current_id.fetch_add(1, Ordering::SeqCst);
 
         let user = User::new(c_id, username.to_string(), pbkdf2::pbkdf2_simple(&password, PBKDF2_ITERATIONS).unwrap());
 
@@ -105,7 +107,7 @@ impl Users {
         self.users.get(id)
     }
 
-    fn get_mut_by_id(&mut self, id: &usize) -> Option<chashmap::WriteGuard<'_, usize, User>> {
+    fn get_mut_by_id(&self, id: &usize) -> Option<chashmap::WriteGuard<'_, usize, User>> {
         self.users.get_mut(id)
     }
 
@@ -135,6 +137,20 @@ struct Server {
     user_id: Option<usize>,
     socket: ws::Sender,
     channel: crossbeam::Sender<Message>,
+}
+
+impl Eq for Server { }
+
+impl PartialEq for Server {
+    fn eq(&self, other: &Server) -> bool {
+        self.socket.token() == other.socket.token()
+    }
+}
+
+impl evmap::ShallowCopy for Server {
+    unsafe fn shallow_copy(&mut self) -> Self {
+        Server { id: self.id, user_id: self.user_id, socket: self.socket.clone(), channel: self.channel.clone() }
+    }
 }
 
 impl Handler for Server {
@@ -200,11 +216,16 @@ fn main() {
 
     let c_current_server_id: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let c_servers: Arc<CHashMap<usize, Server>> = Arc::new(CHashMap::new());
-    let c_users: Arc<Mutex<Users>> = Arc::new(Mutex::new(Users::new()));
+    let c_users: Arc<Users> = Arc::new(Users::new());
 
     let (t_tx, t_rx) = unbounded();
+
+    let (servers_r, servers_w) = evmap::new();
+    let c_servers_w = Arc::new(Mutex::new(servers_w));
+
+    let mut threads = Vec::new();
     
-    let server = thread::spawn(move || {
+    threads.push(thread::spawn(move || {
         if let Ok(socket) = ws::Builder::new()
         .with_settings(ws::Settings {max_connections: 100_000, ..ws::Settings::default()})
         .build(|out| Server {
@@ -215,85 +236,77 @@ fn main() {
         }) {
             let _ = socket.listen(ENDPOINT);
         }
-    });
+    }));
 
-    {
-        for i in 0..WORKERS {
-            let t_rx = t_rx.clone();
-            let t_users = c_users.clone();
-            let t_current_server_id = c_current_server_id.clone();
-            let c_servers = c_servers.clone();
+    for i in 0..WORKERS {
+        let t_rx = t_rx.clone();
+        let c_users = c_users.clone();
+        let c_current_server_id = c_current_server_id.clone();
+        let c_servers = c_servers.clone();
 
-            thread::spawn(move || {
-                loop {
-                    if let Ok(msg) = t_rx.recv() {
-                        match msg {
-                            Message::Open { server, tx } => {
-                                let c_id = t_current_server_id.fetch_add(1, Ordering::Relaxed);
-                                &c_servers.insert(c_id, server);
-                                println!("{}: {} active servers (new with id {})", i, &c_servers.len(), c_id);
-                                if let Some(server) = &c_servers.get(&c_id) {
-                                    println!("{}: Got server {}", i, server.id);
-                                }
-                                let _ = tx.send(c_id);
-                            }
-                            Message::Close { id, code } => {
-                                &c_servers.remove(&id);
-                                println!("{}: {} active servers ({:?})", i, &c_servers.len(), code);
-                            }
-                            Message::Login { id, username, password, tx } => {
-                                let status = {
-                                    if let Ok(mut users) = t_users.lock() {
-                                        if let Some(user) = users.get_by_name(&username) {
-                                            match pbkdf2::pbkdf2_check(&password, &user.password) {
-                                                Ok(()) => {
-                                                    if let Some(ref mut server) = c_servers.get_mut(&id) {
-                                                        server.user_id = Some(user.id);
-                                                    }
-                                                    true
-                                                }
-                                                _ => false
-                                            }
-                                        } else {
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                };
+        let c_servers_r = servers_r.clone();
+        let c_servers_w = c_servers_w.clone();
 
-                                let _ = tx.send(JsonMessage::LoginResponse { status });
-                            }
-                            Message::Register { id, username, password, tx } => {
-                                if let Ok(mut users) = t_users.lock() {
-                                    let status = {
-                                        if users.contains_username(&username) {
-                                            false
-                                        } else {
-                                            let user_id = users.add(&username, &password);
+        threads.push(thread::spawn(move || {
+            loop {
+                if let Ok(msg) = t_rx.recv() {
+                    match msg {
+                        Message::Open { server, tx } => {
+                            let c_id = c_current_server_id.fetch_add(1, Ordering::SeqCst);
+                            &c_servers.insert(c_id, server);
+                            
+                            //c_servers_w.lock().unwrap().update(c_id, server);
+                            //println!("{}: {} active servers (new with id {})", i, &c_servers.len(), c_id);
+                            let _ = tx.send(c_id);
+                        }
+                        Message::Close { id, code } => {
+                            &c_servers.remove(&id);
+                            //println!("{}: {} active servers ({:?})", i, &c_servers.len(), code);
+                        }
+                        Message::Login { id, username, password, tx } => {
+                            let status = {
+                                if let Some(user) = &c_users.get_by_name(&username) {
+                                    match pbkdf2::pbkdf2_check(&password, &user.password) {
+                                        Ok(()) => {
                                             if let Some(ref mut server) = c_servers.get_mut(&id) {
-                                                server.user_id = Some(user_id);
+                                                server.user_id = Some(user.id);
                                             }
                                             true
                                         }
-                                    };
-                                    
-                                    let _ = tx.send(JsonMessage::RegisterResponse { status });
+                                        _ => false
+                                    }
+                                } else {
+                                    false
                                 }
-                            }
-                            Message::Message {id, msg} => {
-                                if let Some(server) = &c_servers.get(&id) {
-                                    if let Some(user_id) = server.user_id {
-                                        if let Ok(users) = t_users.lock() {
-                                            if let Some(user) = &users.get_by_id(&user_id) {
-                                                if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
-                                                    for (_, server) in (*c_servers).clone().into_iter() {
-                                                        if let Some(user_id_other) = server.user_id {
-                                                            if let Some(user_other) = &users.get_by_id(&user_id_other) {
-                                                                if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
-                                                                    let _ = server.socket.send(message.clone());
-                                                                }
-                                                            }
+                            };
+
+                            let _ = tx.send(JsonMessage::LoginResponse { status });
+                        }
+                        Message::Register { id, username, password, tx } => {
+                            let status = {
+                                if c_users.contains_username(&username) {
+                                    false
+                                } else {
+                                    let user_id = c_users.add(&username, &password);
+                                    if let Some(ref mut server) = c_servers.get_mut(&id) {
+                                        server.user_id = Some(user_id);
+                                    }
+                                    true
+                                }
+                            };
+                            
+                            let _ = tx.send(JsonMessage::RegisterResponse { status });
+                        }
+                        Message::Message {id, msg} => {
+                            if let Some(server) = &c_servers.get(&id) {
+                                if let Some(user_id) = server.user_id {
+                                    if let Some(user) = &c_users.get_by_id(&user_id) {
+                                        if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
+                                            for (_, server) in (*c_servers).clone().into_iter() {
+                                                if let Some(user_id_other) = server.user_id {
+                                                    if let Some(user_other) = &c_users.get_by_id(&user_id_other) {
+                                                        if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
+                                                            let _ = server.socket.send(message.clone());
                                                         }
                                                     }
                                                 }
@@ -302,34 +315,32 @@ fn main() {
                                     }
                                 }
                             }
-                            Message::Location { id, lat, lon } => {
-                                if let Some(server) = &c_servers.get(&id) {
-                                    if let Some(user_id) = server.user_id {
-                                        if let Ok(mut users) = t_users.lock() {
-                                            if let Some(mut user) = users.get_mut_by_id(&user_id) {
-                                                user.lat = lat;
-                                                user.lon = lon;
-                                            }
-                                        }
+                        }
+                        Message::Location { id, lat, lon } => {
+                            if let Some(server) = &c_servers.get(&id) {
+                                if let Some(user_id) = server.user_id {
+                                    if let Some(ref mut user) = c_users.get_mut_by_id(&user_id) {
+                                        user.lat = lat;
+                                        user.lon = lon;
                                     }
                                 }
                             }
                         }
-                    } else {
-                        thread::yield_now();
                     }
-                } 
-            });
-        }
+                } else {
+                    thread::yield_now();
+                }
+            }
+        }));
     }
 
-    {
-        thread::spawn(move || {
-            while let Ok(msg) = rx.recv() {
-                let _ = t_tx.send(msg);
-            } 
-        });
-    }
+    threads.push(thread::spawn(move || {
+        while let Ok(msg) = rx.recv() {
+            let _ = t_tx.send(msg);
+        } 
+    }));
 
-    let _ = server.join();
+    for thread in threads {
+        let _ = thread.join();
+    }
 }
