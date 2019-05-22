@@ -93,7 +93,7 @@ impl Users {
     }
 
     fn add(&self, username: &str, password: &str) -> usize {
-        let c_id = self.current_id.fetch_add(1, Ordering::SeqCst);
+        let c_id = self.current_id.fetch_add(1, Ordering::Relaxed);
 
         let user = User::new(c_id, username.to_string(), pbkdf2::pbkdf2_simple(&password, PBKDF2_ITERATIONS).unwrap());
 
@@ -103,12 +103,12 @@ impl Users {
         c_id
     }
 
-    fn get_by_id(&self, id: &usize) -> Option<chashmap::ReadGuard<'_, usize, User>> {
-        self.users.get(id)
+    fn get_by_id(&self, id: usize) -> Option<chashmap::ReadGuard<'_, usize, User>> {
+        self.users.get(&id)
     }
 
-    fn get_mut_by_id(&self, id: &usize) -> Option<chashmap::WriteGuard<'_, usize, User>> {
-        self.users.get_mut(id)
+    fn get_mut_by_id(&self, id: usize) -> Option<chashmap::WriteGuard<'_, usize, User>> {
+        self.users.get_mut(&id)
     }
 
     fn get_by_name(&self, username: &str) -> Option<chashmap::ReadGuard<'_, usize, User>> {
@@ -215,7 +215,6 @@ fn main() {
     let (tx, rx) = unbounded();
 
     let c_current_server_id: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-    let c_servers: Arc<CHashMap<usize, Server>> = Arc::new(CHashMap::new());
     let c_users: Arc<Users> = Arc::new(Users::new());
 
     let (t_tx, t_rx) = unbounded();
@@ -251,7 +250,7 @@ fn main() {
                 if let Ok(msg) = t_rx.recv() {
                     match msg {
                         Message::Open { server, tx } => {
-                            let c_id = c_current_server_id.fetch_add(1, Ordering::SeqCst);
+                            let c_id = c_current_server_id.fetch_add(1, Ordering::Relaxed);
                             
                             c_servers_w.lock().unwrap().update(c_id, server).refresh();
                             println!("{}: {} active servers (new with id {})", i, c_servers_r.len(), c_id);
@@ -311,12 +310,12 @@ fn main() {
                             c_servers_r.get_and(&id, |rs| {
                                 if let Some(server) = rs.first() {
                                     if let Some(user_id) = server.user_id {
-                                        if let Some(user) = &c_users.get_by_id(&user_id) {
+                                        if let Some(user) = &c_users.get_by_id(user_id) {
                                             if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
                                                 c_servers_r.for_each(|_, servers| {
                                                     if let Some(server) = servers.first() {
                                                         if let Some(user_id_other) = server.user_id {
-                                                            if let Some(user_other) = &c_users.get_by_id(&user_id_other) {
+                                                            if let Some(user_other) = &c_users.get_by_id(user_id_other) {
                                                                 if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
                                                                     let _ = server.socket.send(message.clone());
                                                                 }
@@ -334,7 +333,7 @@ fn main() {
                             c_servers_r.get_and(&id, |rs| {
                                 if let Some(server) = rs.first() {
                                     if let Some(user_id) = server.user_id {
-                                        if let Some(ref mut user) = c_users.get_mut_by_id(&user_id) {
+                                        if let Some(ref mut user) = c_users.get_mut_by_id(user_id) {
                                             user.lat = lat;
                                             user.lon = lon;
                                         }
