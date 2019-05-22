@@ -242,7 +242,6 @@ fn main() {
         let t_rx = t_rx.clone();
         let c_users = c_users.clone();
         let c_current_server_id = c_current_server_id.clone();
-        let c_servers = c_servers.clone();
 
         let c_servers_r = servers_r.clone();
         let c_servers_w = c_servers_w.clone();
@@ -253,24 +252,30 @@ fn main() {
                     match msg {
                         Message::Open { server, tx } => {
                             let c_id = c_current_server_id.fetch_add(1, Ordering::SeqCst);
-                            &c_servers.insert(c_id, server);
                             
-                            //c_servers_w.lock().unwrap().update(c_id, server);
-                            //println!("{}: {} active servers (new with id {})", i, &c_servers.len(), c_id);
+                            c_servers_w.lock().unwrap().update(c_id, server).refresh();
+                            println!("{}: {} active servers (new with id {})", i, c_servers_r.len(), c_id);
+
                             let _ = tx.send(c_id);
                         }
-                        Message::Close { id, code } => {
-                            &c_servers.remove(&id);
-                            //println!("{}: {} active servers ({:?})", i, &c_servers.len(), code);
+                        Message::Close { id, code} => {
+                            c_servers_w.lock().unwrap().empty(id).refresh();
+                            
+                            println!("{}: {} active servers ({:?})", i, c_servers_r.len(), code);
                         }
                         Message::Login { id, username, password, tx } => {
                             let status = {
                                 if let Some(user) = &c_users.get_by_name(&username) {
                                     match pbkdf2::pbkdf2_check(&password, &user.password) {
                                         Ok(()) => {
-                                            if let Some(ref mut server) = c_servers.get_mut(&id) {
-                                                server.user_id = Some(user.id);
-                                            }
+                                            c_servers_r.get_and(&id, |rs| {
+                                                if let Some(server) = rs.first() {
+                                                    let mut server = server.clone();
+                                                    server.user_id = Some(user.id);
+                                                    c_servers_w.lock().unwrap().update(id, server).refresh();
+                                                }
+                                            });
+
                                             true
                                         }
                                         _ => false
@@ -288,9 +293,14 @@ fn main() {
                                     false
                                 } else {
                                     let user_id = c_users.add(&username, &password);
-                                    if let Some(ref mut server) = c_servers.get_mut(&id) {
-                                        server.user_id = Some(user_id);
-                                    }
+                                    c_servers_r.get_and(&id, |rs| {
+                                        if let Some(server) = rs.first() {
+                                            let mut server = server.clone();
+                                            server.user_id = Some(user_id);
+                                            c_servers_w.lock().unwrap().update(id, server).refresh();
+                                        }
+                                    });
+
                                     true
                                 }
                             };
@@ -298,33 +308,39 @@ fn main() {
                             let _ = tx.send(JsonMessage::RegisterResponse { status });
                         }
                         Message::Message {id, msg} => {
-                            if let Some(server) = &c_servers.get(&id) {
-                                if let Some(user_id) = server.user_id {
-                                    if let Some(user) = &c_users.get_by_id(&user_id) {
-                                        if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
-                                            for (_, server) in (*c_servers).clone().into_iter() {
-                                                if let Some(user_id_other) = server.user_id {
-                                                    if let Some(user_other) = &c_users.get_by_id(&user_id_other) {
-                                                        if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
-                                                            let _ = server.socket.send(message.clone());
+                            c_servers_r.get_and(&id, |rs| {
+                                if let Some(server) = rs.first() {
+                                    if let Some(user_id) = server.user_id {
+                                        if let Some(user) = &c_users.get_by_id(&user_id) {
+                                            if let Ok(message) = serde_json::to_string(&JsonMessage::Message { username: user.name.clone(), msg: msg.clone() }) {
+                                                c_servers_r.for_each(|_, servers| {
+                                                    if let Some(server) = servers.first() {
+                                                        if let Some(user_id_other) = server.user_id {
+                                                            if let Some(user_other) = &c_users.get_by_id(&user_id_other) {
+                                                                if user.within_bounds(user_other, 0.1) && user_other.distance_to(user) < 10.0 {
+                                                                    let _ = server.socket.send(message.clone());
+                                                                }
+                                                            }
                                                         }
                                                     }
-                                                }
+                                                });
                                             }
                                         }
                                     }
                                 }
-                            }
+                            });
                         }
                         Message::Location { id, lat, lon } => {
-                            if let Some(server) = &c_servers.get(&id) {
-                                if let Some(user_id) = server.user_id {
-                                    if let Some(ref mut user) = c_users.get_mut_by_id(&user_id) {
-                                        user.lat = lat;
-                                        user.lon = lon;
+                            c_servers_r.get_and(&id, |rs| {
+                                if let Some(server) = rs.first() {
+                                    if let Some(user_id) = server.user_id {
+                                        if let Some(ref mut user) = c_users.get_mut_by_id(&user_id) {
+                                            user.lat = lat;
+                                            user.lon = lon;
+                                        }
                                     }
                                 }
-                            }
+                            });
                         }
                     }
                 } else {
