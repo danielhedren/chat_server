@@ -8,3 +8,5 @@ ws = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 pbkdf2 = "*"
+crossbeam = "*"
+chashmap = "*"
