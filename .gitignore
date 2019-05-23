@@ -2,3 +2,10 @@
 /target
 **/*.rs.bk
 .vscode/launch.json
+.idea/dictionaries/Daniel.xml
+.idea/chat_server.iml
+.idea/encodings.xml
+.idea/misc.xml
+.idea/modules.xml
+.idea/vcs.xml
+.idea/workspace.xml
