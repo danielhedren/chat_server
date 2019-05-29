@@ -9,7 +9,7 @@ serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 pbkdf2 = "*"
 crossbeam = "*"
-crossbeam-utils = "*"
 chashmap = "*"
 evmap = "*"
 parking_lot = "*"
+clap = "*"
