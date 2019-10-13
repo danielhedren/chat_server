@@ -1,7 +1,6 @@
 #![warn(unused_extern_crates)]
 
 extern crate chashmap;
-extern crate clap;
 extern crate crossbeam;
 extern crate parking_lot;
 extern crate pbkdf2;
@@ -9,7 +8,6 @@ extern crate serde;
 extern crate serde_json;
 extern crate ws;
 
-use clap::{App, Arg};
 use crossbeam::channel::unbounded;
 use parking_lot::RwLock;
 use std::{sync::Arc, thread};
@@ -19,53 +17,7 @@ use server::{JsonMessage, Message, Server, Servers, Users};
 
 const ENDPOINT: &str = "127.0.0.1:3012";
 const WORKERS: usize = 4;
-
-use std::path::PathBuf;
-
 fn main() {
-    let mut path = PathBuf::new();
-
-    path.push(r"C:\");
-    path.push("windows");
-    path.push("system32");
-
-    println!(
-        "{}",
-        match path {
-            Some(path) => match path.to_str() {
-                Some(path_str) => path_str,
-                _ => "Invalid",
-            },
-            _ => "Invalid",
-        }
-    );
-
-    let matches = App::new("My Super Program")
-        .version("1.0")
-        .author("Daniel H. <danielhedren@gmail.com>")
-        .about("Does awesome things")
-        .arg(
-            Arg::with_name("config")
-                .short("c")
-                .long("config")
-                .value_name("FILE")
-                .help("Sets a custom config file")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("INPUT")
-                .help("Sets the input file to use")
-                .required(true)
-                .index(1),
-        )
-        .arg(
-            Arg::with_name("v")
-                .short("v")
-                .multiple(true)
-                .help("Sets the level of verbosity"),
-        )
-        .get_matches();
-
     let (tx, rx) = unbounded();
 
     let users = Users::new();
@@ -128,7 +80,7 @@ fn main() {
                             if let Some(user) = &users.get_by_name(&username) {
                                 match pbkdf2::pbkdf2_check(&password, &user.password) {
                                     Ok(()) => {
-                                        if let Some(mut server) = servers.get(id) {
+                                        if let Some(server) = servers.get(id) {
                                             *server.user_id.write() = Some(user.id);
                                             servers.update(id, server);
                                         }
@@ -156,7 +108,7 @@ fn main() {
                             } else {
                                 let user_id = users.add(&username, &password);
 
-                                if let Some(mut server) = servers.get(id) {
+                                if let Some(server) = servers.get(id) {
                                     *server.user_id.write() = Some(user_id);
                                     servers.update(id, server);
                                 }
